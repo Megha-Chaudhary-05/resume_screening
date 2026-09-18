@@ -25,6 +25,8 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str = "postgresql+psycopg://postgres:postgres@localhost:5432/resume_screening"
+    # Direct / session-mode URL used by Alembic for migrations (avoids pgbouncer tx-mode limits)
+    DIRECT_URL: str = ""
 
     # Security
     SECRET_KEY: str = "change-me-in-production"
@@ -32,12 +34,13 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
-    # Uploads
+    # Uploads — Vercel serverless functions can only write to /tmp
     UPLOAD_DIR: str = "uploads"
     MAX_UPLOAD_SIZE_MB: int = 5
     ALLOWED_EXTENSIONS: str = ".pdf,.docx"
 
-    # AI
+    # AI — set to empty string to disable and use fallback (required on Vercel
+    # where sentence-transformers/spacy/torch are not bundled due to size limits)
     SENTENCE_TRANSFORMER_MODEL: str = "all-MiniLM-L6-v2"
     SPACY_MODEL: str = "en_core_web_sm"
 
@@ -63,7 +66,12 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins(self) -> list[str]:
-        return [o.strip() for o in self.BACKEND_CORS_ORIGINS.split(",") if o.strip()]
+        import os
+        origins = [o.strip() for o in self.BACKEND_CORS_ORIGINS.split(",") if o.strip()]
+        if os.environ.get("VERCEL") or os.environ.get("VERCEL_ENV"):
+            if "*" not in origins:
+                origins.append("*")
+        return origins
 
     @property
     def allowed_extensions(self) -> list[str]:
@@ -74,10 +82,31 @@ class Settings(BaseSettings):
     @field_validator("DATABASE_URL")
     @classmethod
     def _fix_driver(cls, v: str) -> str:
-        # Accept plain postgresql:// URLs and force the psycopg (v3) driver.
+        import os
+        if (os.environ.get("VERCEL") or os.environ.get("VERCEL_ENV")) and "localhost" in v:
+            return "sqlite:////tmp/app.db"
         if v.startswith("postgresql://"):
             return v.replace("postgresql://", "postgresql+psycopg://", 1)
         return v
+
+    @field_validator("SENTENCE_TRANSFORMER_MODEL", "SPACY_MODEL", mode="before")
+    @classmethod
+    def _disable_heavy_models_on_vercel(cls, v: str) -> str:
+        """Force ML models off on Vercel to avoid missing-library errors."""
+        import os
+        if os.environ.get("VERCEL") or os.environ.get("VERCEL_ENV"):
+            return ""
+        return v
+
+    @field_validator("UPLOAD_DIR", mode="before")
+    @classmethod
+    def _fix_upload_dir(cls, v: str) -> str:
+        """Use /tmp on Vercel — the only writable path in serverless functions."""
+        import os
+        if os.environ.get("VERCEL") or os.environ.get("VERCEL_ENV"):
+            return "/tmp/uploads"
+        return v
+
 
 
 @lru_cache
